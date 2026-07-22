@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 _SCHEMA = """
@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS watched_sources (
     custody_mode TEXT NOT NULL DEFAULT 'METADATA_ONLY'
         CHECK (custody_mode IN ('METADATA_ONLY', 'REDACTED_EXCERPT')),
     policy_version TEXT NOT NULL,
+    include_patterns TEXT NOT NULL DEFAULT '[]',
+    exclude_patterns TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -37,6 +39,18 @@ CREATE TABLE IF NOT EXISTS control_audit (
     detail TEXT NOT NULL,
     FOREIGN KEY (source_id) REFERENCES watched_sources(source_id)
 );
+
+CREATE TRIGGER IF NOT EXISTS control_audit_no_update
+BEFORE UPDATE ON control_audit
+BEGIN
+    SELECT RAISE(ABORT, 'control_audit is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS control_audit_no_delete
+BEFORE DELETE ON control_audit
+BEGIN
+    SELECT RAISE(ABORT, 'control_audit is append-only');
+END;
 """
 
 
@@ -49,11 +63,22 @@ def connect_database(database_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def bootstrap_database(database_path: Path) -> None:
-    """Create the first local schema without destructive migration behavior."""
+    """Create or safely advance the local schema without destructive migration behavior."""
 
     with connect_database(database_path) as connection:
         connection.executescript(_SCHEMA)
+        _ensure_column(connection, "watched_sources", "include_patterns", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "watched_sources", "exclude_patterns", "TEXT NOT NULL DEFAULT '[]'")
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
