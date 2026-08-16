@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 _SCHEMA = """
@@ -30,6 +30,53 @@ CREATE TABLE IF NOT EXISTS watched_sources (
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_watched_sources_root
 ON watched_sources(canonical_root);
+
+CREATE TABLE IF NOT EXISTS normalized_events (
+    event_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    source_id TEXT NOT NULL,
+    source_identity_ref TEXT NOT NULL,
+    source_event_ref TEXT NOT NULL,
+    source_path_or_uri TEXT NOT NULL,
+    content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+    observed_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    trust_tier TEXT NOT NULL
+        CHECK (trust_tier IN ('trusted', 'controlled', 'untrusted', 'unknown')),
+    provenance_refs TEXT NOT NULL DEFAULT '[]',
+    custody_mode TEXT NOT NULL
+        CHECK (custody_mode IN ('metadata_only', 'redacted_excerpt', 'controlled_content')),
+    quarantine_state TEXT NOT NULL
+        CHECK (quarantine_state IN ('clear', 'review', 'required', 'rejected')),
+    use_restrictions TEXT NOT NULL DEFAULT '[]',
+    processing_state TEXT NOT NULL
+        CHECK (processing_state IN (
+            'received', 'validated', 'quarantined', 'accepted',
+            'processed', 'failed', 'superseded'
+        )),
+    prior_event_ref TEXT,
+    policy_version TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES watched_sources(source_id),
+    FOREIGN KEY (prior_event_ref) REFERENCES normalized_events(event_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_normalized_events_source
+ON normalized_events(source_id, received_at);
+
+CREATE INDEX IF NOT EXISTS ix_normalized_events_hash
+ON normalized_events(content_hash);
+
+CREATE TRIGGER IF NOT EXISTS normalized_events_no_update
+BEFORE UPDATE ON normalized_events
+BEGIN
+    SELECT RAISE(ABORT, 'normalized_events is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS normalized_events_no_delete
+BEFORE DELETE ON normalized_events
+BEGIN
+    SELECT RAISE(ABORT, 'normalized_events is append-only');
+END;
 
 CREATE TABLE IF NOT EXISTS control_audit (
     audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
