@@ -158,9 +158,16 @@ def test_version_one_database_is_advanced_non_destructively(tmp_path: Path) -> N
 
     with sqlite3.connect(database_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(watched_sources)")}
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()[0]
 
     assert {"include_patterns", "exclude_patterns"}.issubset(columns)
-    assert version == "2"
+    assert "normalized_events" in tables
+    assert version == "3"
