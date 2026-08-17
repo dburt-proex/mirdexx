@@ -34,6 +34,11 @@ class FakeTranscriber:
         )
 
 
+class EmptyTranscriber:
+    def transcribe(self, media_path, *, mode="standard", language=None):
+        return TranscriptResult(text="   ", model="fake-transcriber", mode=mode, language=language or "en")
+
+
 class FakeAnalyzer:
     def analyze(self, transcript, *, project_ref=None):
         return MediaAnalysis(
@@ -89,6 +94,19 @@ def test_pipeline_is_fail_closed_without_controlled_content(tmp_path):
     source = SourceRegistry(db).register(root, custody_mode="METADATA_ONLY")
     pipeline = MediaIntelligencePipeline(ledger=EventLedger(db), transcriber=FakeTranscriber(), analyzer=FakeAnalyzer())
     with pytest.raises(MediaPolicyDenied):
+        pipeline.ingest(media, source_id=source.source_id)
+
+
+def test_pipeline_aborts_on_empty_transcription(tmp_path):
+    db = tmp_path / "db.sqlite"
+    bootstrap_database(db)
+    root = tmp_path / "media"
+    root.mkdir()
+    media = root / "silent.m4a"
+    media.write_bytes(b"audio")
+    source = SourceRegistry(db).register(root, custody_mode="CONTROLLED_CONTENT")
+    pipeline = MediaIntelligencePipeline(ledger=EventLedger(db), transcriber=EmptyTranscriber(), analyzer=FakeAnalyzer())
+    with pytest.raises(RuntimeError, match="empty text"):
         pipeline.ingest(media, source_id=source.source_id)
 
 
