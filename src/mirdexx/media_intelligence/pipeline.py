@@ -5,7 +5,7 @@ from typing import Protocol
 
 from mirdexx.event_ledger import EventLedger
 
-from .models import MediaAnalysis, PipelineResult, TranscriptResult, TranscriptionMode
+from .models import MediaAnalysis, NotionPublishResult, PipelineResult, TranscriptResult, TranscriptionMode
 
 
 class MediaPolicyDenied(PermissionError):
@@ -21,7 +21,22 @@ class Analyzer(Protocol):
 
 
 class Sink(Protocol):
-    def publish(self, media_path: Path, *, transcript: TranscriptResult, analysis: MediaAnalysis, source_sha256: str, mirdexx_artifact_id: str, project_ref: str | None, data_policy: str, source_url: str | None = None) -> tuple[str, str | None]: ...
+    def publish(
+        self,
+        media_path: Path,
+        *,
+        transcript: TranscriptResult,
+        analysis: MediaAnalysis,
+        source_sha256: str,
+        transcript_sha256: str,
+        mirdexx_artifact_id: str,
+        transcript_artifact_id: str,
+        analysis_artifact_id: str,
+        project_ref: str | None,
+        project_page_id: str | None,
+        data_policy: str,
+        source_url: str | None = None,
+    ) -> NotionPublishResult: ...
 
 
 class MediaIntelligencePipeline:
@@ -41,6 +56,7 @@ class MediaIntelligencePipeline:
         mode: TranscriptionMode = "standard",
         language: str | None = None,
         project_ref: str | None = None,
+        project_page_id: str | None = None,
         data_policy: str = "Internal",
         trust_tier: str = "controlled",
         source_url: str | None = None,
@@ -89,16 +105,19 @@ class MediaIntelligencePipeline:
             additional_provenance_refs=(f"event:{transcript_event.event_id}",),
         )
 
-        notion_page_id = None
-        notion_page_url = None
+        publish_result: NotionPublishResult | None = None
         if self.sink is not None:
-            notion_page_id, notion_page_url = self.sink.publish(
+            publish_result = self.sink.publish(
                 media_path,
                 transcript=transcript,
                 analysis=analysis,
                 source_sha256=original.content_hash,
+                transcript_sha256=transcript_event.content_hash,
                 mirdexx_artifact_id=original.event_id,
+                transcript_artifact_id=transcript_event.event_id,
+                analysis_artifact_id=analysis_event.event_id,
                 project_ref=project_ref,
+                project_page_id=project_page_id,
                 data_policy=data_policy,
                 source_url=source_url,
             )
@@ -108,8 +127,13 @@ class MediaIntelligencePipeline:
             transcript_event_id=transcript_event.event_id,
             analysis_event_id=analysis_event.event_id,
             source_sha256=original.content_hash,
-            notion_page_id=notion_page_id,
-            notion_page_url=notion_page_url,
+            transcript_sha256=transcript_event.content_hash,
+            notion_page_id=publish_result.page_id if publish_result else None,
+            notion_page_url=publish_result.page_url if publish_result else None,
+            promotion_state=publish_result.promotion_state if publish_result else None,
+            promoted_task_ids=publish_result.promoted_task_ids if publish_result else [],
+            promoted_decision_ids=publish_result.promoted_decision_ids if publish_result else [],
+            promoted_evidence_ids=publish_result.promoted_evidence_ids if publish_result else [],
             analysis=analysis,
             transcript=transcript,
         )
