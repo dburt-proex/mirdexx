@@ -64,6 +64,9 @@ class MediaIntelligencePipeline:
         )
 
         transcript = self.transcriber.transcribe(media_path, mode=mode, language=language)
+        if not transcript.text.strip():
+            raise RuntimeError("transcription returned empty text; analysis and publication aborted")
+
         transcript_payload = transcript.model_dump_json()
         transcript_event = self.ledger.record_derived_content(
             original.event_id,
