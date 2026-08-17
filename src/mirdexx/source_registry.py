@@ -56,7 +56,7 @@ class SourceRegistry:
         canonical_root = Path(root).expanduser().resolve(strict=False)
         if source_kind not in {"FOLDER", "GIT_REPOSITORY", "MANUAL"}:
             raise ValueError("unsupported source_kind")
-        if custody_mode not in {"METADATA_ONLY", "REDACTED_EXCERPT"}:
+        if custody_mode not in {"METADATA_ONLY", "REDACTED_EXCERPT", "CONTROLLED_CONTENT"}:
             raise ValueError("unsupported custody_mode")
 
         includes = self._normalize_patterns(include_patterns)
