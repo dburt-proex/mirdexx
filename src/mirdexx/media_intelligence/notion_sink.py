@@ -9,7 +9,7 @@ from typing import Iterable
 
 import httpx
 
-from .models import MediaAnalysis, TranscriptResult
+from .models import MediaAnalysis, NotionPublishResult, PromotionState, TranscriptResult
 
 NOTION_VERSION = "2026-03-11"
 _SINGLE_PART_LIMIT = 20 * 1024 * 1024
@@ -18,22 +18,45 @@ _TEXT_CHUNK = 1800
 
 
 class NotionVideoIntelligenceSink:
-    """Upload original media and write the normalized Video Intelligence record."""
+    """Upload original media, write Video Intelligence, and optionally promote governed candidates."""
 
     def __init__(
         self,
         *,
         token: str | None = None,
         data_source_id: str | None = None,
+        projects_data_source_id: str | None = None,
+        tasks_data_source_id: str | None = None,
+        decisions_data_source_id: str | None = None,
+        evidence_data_source_id: str | None = None,
+        promote_candidates: bool = False,
         client: httpx.Client | None = None,
         base_url: str = "https://api.notion.com",
     ) -> None:
         self.token = token or os.getenv("NOTION_API_KEY")
         self.data_source_id = data_source_id or os.getenv("NOTION_VIDEO_INTELLIGENCE_DATA_SOURCE_ID")
+        self.projects_data_source_id = projects_data_source_id or os.getenv("NOTION_PROJECTS_DATA_SOURCE_ID")
+        self.tasks_data_source_id = tasks_data_source_id or os.getenv("NOTION_TASKS_DATA_SOURCE_ID")
+        self.decisions_data_source_id = decisions_data_source_id or os.getenv("NOTION_DECISIONS_DATA_SOURCE_ID")
+        self.evidence_data_source_id = evidence_data_source_id or os.getenv("NOTION_EVIDENCE_DATA_SOURCE_ID")
+        self.promote_candidates = promote_candidates
         if not self.token:
             raise ValueError("NOTION_API_KEY is required")
         if not self.data_source_id:
             raise ValueError("NOTION_VIDEO_INTELLIGENCE_DATA_SOURCE_ID is required")
+        if self.promote_candidates:
+            missing = [
+                name
+                for name, value in {
+                    "NOTION_PROJECTS_DATA_SOURCE_ID": self.projects_data_source_id,
+                    "NOTION_TASKS_DATA_SOURCE_ID": self.tasks_data_source_id,
+                    "NOTION_DECISIONS_DATA_SOURCE_ID": self.decisions_data_source_id,
+                    "NOTION_EVIDENCE_DATA_SOURCE_ID": self.evidence_data_source_id,
+                }.items()
+                if not value
+            ]
+            if missing:
+                raise ValueError(f"canonical promotion requires: {', '.join(missing)}")
         self.client = client or httpx.Client(base_url=base_url, timeout=120.0)
         self.headers = {
             "Authorization": f"Bearer {self.token}",
@@ -47,13 +70,24 @@ class NotionVideoIntelligenceSink:
         transcript: TranscriptResult,
         analysis: MediaAnalysis,
         source_sha256: str,
+        transcript_sha256: str,
         mirdexx_artifact_id: str,
+        transcript_artifact_id: str,
+        analysis_artifact_id: str,
         project_ref: str | None,
+        project_page_id: str | None,
         data_policy: str,
         source_url: str | None = None,
-    ) -> tuple[str, str | None]:
+    ) -> NotionPublishResult:
         media_path = Path(media_path)
         upload_id = self.upload_media(media_path)
+        initial_state: PromotionState = (
+            "Rejected"
+            if self.promote_candidates and analysis.casa_routing == "HALT"
+            else "Candidate"
+            if self.promote_candidates
+            else "Not Promoted"
+        )
         page = self._create_page(
             media_path,
             upload_id=upload_id,
@@ -62,12 +96,55 @@ class NotionVideoIntelligenceSink:
             source_sha256=source_sha256,
             mirdexx_artifact_id=mirdexx_artifact_id,
             project_ref=project_ref,
+            project_page_id=project_page_id,
             data_policy=data_policy,
             source_url=source_url,
+            promotion_state=initial_state,
         )
         page_id = str(page["id"])
-        self._append_page_content(page_id, media_path, upload_id, transcript, analysis, source_sha256, mirdexx_artifact_id)
-        return page_id, page.get("url")
+        self._append_page_content(
+            page_id,
+            media_path,
+            upload_id,
+            transcript,
+            analysis,
+            source_sha256,
+            mirdexx_artifact_id,
+        )
+
+        receipt = NotionPublishResult(
+            page_id=page_id,
+            page_url=page.get("url"),
+            promotion_state=initial_state,
+        )
+        if not self.promote_candidates or analysis.casa_routing == "HALT":
+            return receipt
+
+        try:
+            task_ids, decision_ids, evidence_ids = self._promote_candidates(
+                media_page_id=page_id,
+                analysis=analysis,
+                transcript_sha256=transcript_sha256,
+                transcript_artifact_id=transcript_artifact_id,
+                analysis_artifact_id=analysis_artifact_id,
+                project_page_id=project_page_id,
+                data_policy=data_policy,
+            )
+            final_state: PromotionState = "Promoted" if analysis.casa_routing == "ALLOW" else "REVIEW"
+            self._set_promotion_state(page_id, final_state)
+            return NotionPublishResult(
+                page_id=page_id,
+                page_url=page.get("url"),
+                promotion_state=final_state,
+                promoted_task_ids=task_ids,
+                promoted_decision_ids=decision_ids,
+                promoted_evidence_ids=evidence_ids,
+            )
+        except Exception:
+            # Promotion is not transactional in Notion. Mark the source record for review
+            # and do not silently retry; inspect backlinks before rerunning to avoid duplicates.
+            self._set_promotion_state(page_id, "REVIEW")
+            raise
 
     def upload_media(self, media_path: Path) -> str:
         media_path = Path(media_path)
@@ -122,12 +199,15 @@ class NotionVideoIntelligenceSink:
         source_sha256: str,
         mirdexx_artifact_id: str,
         project_ref: str | None,
+        project_page_id: str | None,
         data_policy: str,
         source_url: str | None,
+        promotion_state: PromotionState,
     ) -> dict:
         properties: dict = {
             "Name": self._title(media_path.stem),
             "Status": {"select": {"name": "Analyzed"}},
+            "Promotion State": {"select": {"name": promotion_state}},
             "Media Type": {"select": {"name": "Video" if media_path.suffix.lower() in {".mp4", ".mpeg", ".webm", ".mov", ".m4v", ".mkv"} else "Audio"}},
             "Media File": {"files": [{"name": media_path.name, "type": "file_upload", "file_upload": {"id": upload_id}}]},
             "Project Ref": self._rich_text(project_ref or ""),
@@ -143,14 +223,108 @@ class NotionVideoIntelligenceSink:
             "Data Policy": {"select": {"name": data_policy}},
             "Processed At": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
         }
+        if project_page_id:
+            properties["Project"] = self._relation(project_page_id)
         if transcript.duration_seconds is not None:
             properties["Duration Seconds"] = {"number": transcript.duration_seconds}
         if source_url:
             properties["Source URL"] = {"url": source_url}
+        return self._create_record(self.data_source_id, properties)
+
+    def _promote_candidates(
+        self,
+        *,
+        media_page_id: str,
+        analysis: MediaAnalysis,
+        transcript_sha256: str,
+        transcript_artifact_id: str,
+        analysis_artifact_id: str,
+        project_page_id: str | None,
+        data_policy: str,
+    ) -> tuple[list[str], list[str], list[str]]:
+        task_ids: list[str] = []
+        decision_ids: list[str] = []
+        evidence_ids: list[str] = []
+
+        for task in analysis.tasks:
+            notes = [task.description.strip()]
+            if task.owner:
+                notes.append(f"Detected owner: {task.owner}")
+            if task.evidence_refs:
+                notes.append(f"Evidence refs: {', '.join(task.evidence_refs)}")
+            properties: dict = {
+                "Name": self._title(task.title),
+                "Status": {"select": {"name": "Backlog"}},
+                "Priority": {"select": {"name": task.priority}},
+                "Notes": self._rich_text("\n".join(value for value in notes if value)),
+                "Source Type": {"select": {"name": "Transcript"}},
+                "CASA Routing": {"select": {"name": analysis.casa_routing}},
+                "Governance State": {"select": {"name": "Reviewed" if analysis.casa_routing == "ALLOW" else "Candidate"}},
+                "Mirdexx Artifact ID": self._rich_text(analysis_artifact_id),
+                "Origin Media": self._relation(media_page_id),
+            }
+            if project_page_id:
+                properties["Project"] = self._relation(project_page_id)
+            if task.due_date:
+                properties["Due Date"] = {"date": {"start": task.due_date.isoformat()}}
+            record = self._create_record(self.tasks_data_source_id, properties)
+            task_ids.append(str(record["id"]))
+
+        for decision in analysis.decisions:
+            properties = {
+                "Decision": self._title(decision.decision),
+                "Status": {"select": {"name": "Proposed" if analysis.casa_routing == "ALLOW" else "REVIEW"}},
+                "Rationale": self._rich_text(decision.rationale),
+                "Assumptions": self._rich_text("\n".join(decision.assumptions)),
+                "Risks": self._rich_text("\n".join(decision.risks)),
+                "CASA Routing": {"select": {"name": analysis.casa_routing}},
+                "Mirdexx Artifact ID": self._rich_text(analysis_artifact_id),
+                "Origin Media": self._relation(media_page_id),
+            }
+            if project_page_id:
+                properties["Project"] = self._relation(project_page_id)
+            record = self._create_record(self.decisions_data_source_id, properties)
+            decision_ids.append(str(record["id"]))
+
+        for evidence in analysis.evidence:
+            support = evidence.support
+            if evidence.speaker:
+                support = f"Speaker {evidence.speaker}: {support}"
+            properties = {
+                "Evidence": self._title(evidence.claim),
+                "Evidence Type": {"select": {"name": "Timestamp" if evidence.start is not None else "Transcript"}},
+                "Support": self._rich_text(support),
+                "Confidence": {"number": evidence.confidence},
+                "Integrity SHA256": self._rich_text(transcript_sha256),
+                "Data Policy": {"select": {"name": data_policy}},
+                "Mirdexx Artifact ID": self._rich_text(transcript_artifact_id),
+                "Origin Media": self._relation(media_page_id),
+            }
+            if project_page_id:
+                properties["Project"] = self._relation(project_page_id)
+            if evidence.start is not None:
+                properties["Timestamp Start"] = {"number": evidence.start}
+            if evidence.end is not None:
+                properties["Timestamp End"] = {"number": evidence.end}
+            record = self._create_record(self.evidence_data_source_id, properties)
+            evidence_ids.append(str(record["id"]))
+
+        return task_ids, decision_ids, evidence_ids
+
+    def _set_promotion_state(self, page_id: str, state: PromotionState) -> None:
+        self._json_request(
+            "PATCH",
+            f"/v1/pages/{page_id}",
+            json={"properties": {"Promotion State": {"select": {"name": state}}}},
+        )
+
+    def _create_record(self, data_source_id: str | None, properties: dict) -> dict:
+        if not data_source_id:
+            raise ValueError("target Notion data source is not configured")
         return self._json_request(
             "POST",
             "/v1/pages",
-            json={"parent": {"data_source_id": self.data_source_id}, "properties": properties},
+            json={"parent": {"data_source_id": data_source_id}, "properties": properties},
         )
 
     def _append_page_content(
@@ -222,6 +396,10 @@ class NotionVideoIntelligenceSink:
     @staticmethod
     def _rich_text(text: str) -> dict:
         return {"rich_text": [{"type": "text", "text": {"content": text[:1900]}}]} if text else {"rich_text": []}
+
+    @staticmethod
+    def _relation(page_id: str) -> dict:
+        return {"relation": [{"id": page_id}]}
 
     @staticmethod
     def _text(text: str) -> list[dict]:
