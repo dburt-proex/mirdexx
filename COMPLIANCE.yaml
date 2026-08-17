@@ -1,0 +1,65 @@
+version: '0.1'
+system: Mirdexx
+repository: dburt-proex/mirdexx
+canonical_registry: dburt-proex/casa/governance/CONTROL-REGISTRY.yaml
+canonical_registry_version: '0.1'
+claim_boundary: no_certification_or_attestation_claim_without_independent_assurance
+assessment_date: '2026-08-16'
+states: [NOT_APPLICABLE, MISSING, PARTIAL, IMPLEMENTED, VERIFIED]
+controls:
+  GOV-001:
+    status: PARTIAL
+    evidence: [README.md, docs/architecture.md, src/mirdexx/source_registry.py]
+    gap: Strong source/custody boundaries exist, but organization-level governance authority and approval policy are external.
+  RSK-001:
+    status: PARTIAL
+    evidence: [README.md, tests/test_boundary_hardening.py, src/mirdexx/source_registry.py]
+    gap: Boundary and value-risk logic exist; no canonical enterprise risk register/treatment/residual-risk acceptance.
+  IAM-001:
+    status: PARTIAL
+    evidence: [README.md, src/mirdexx/source_registry.py]
+    gap: Explicit source allowlisting is implemented/specified; identity authentication and periodic privileged-access review are not evidenced.
+  CHG-001:
+    status: PARTIAL
+    evidence: [.github/workflows/diffwall.yml, .github/workflows/test.yml]
+    gap: CI/change safeguards exist but are not yet bound to canonical compliance evidence receipts.
+  LOG-001:
+    status: IMPLEMENTED
+    evidence: [src/mirdexx/event_ledger.py, tests/test_event_ledger.py]
+    note: Event-ledger implementation and dedicated regression coverage exist.
+  EVD-001:
+    status: IMPLEMENTED
+    evidence: [src/mirdexx/event_ledger.py, src/mirdexx/source_registry.py, tests/test_event_ledger.py, tests/test_foundation.py]
+    note: Provenance/source registry and ledger evidence are first-class system components.
+  SEC-001:
+    status: PARTIAL
+    evidence: [README.md, tests/test_boundary_hardening.py, docs/architecture.md]
+    gap: Explicit prohibited behaviors/privacy boundaries and hardening tests exist; formal threat model and independent assessment are incomplete.
+  INC-001:
+    status: MISSING
+    evidence: []
+    gap: No complete incident-response lifecycle with containment, RCA, corrective action and retest.
+  AI-001:
+    status: NOT_APPLICABLE
+    evidence: [README.md]
+    note: Current MVP explicitly avoids external AI/model dependency; reassess if probabilistic models are introduced.
+  DAT-001:
+    status: PARTIAL
+    evidence: [README.md, src/mirdexx/source_registry.py, src/mirdexx/database.py]
+    gap: Local-first custody, allowlists, redaction and deletion requirements exist; formal classification/retention schedule and exception records are incomplete.
+  SUP-001:
+    status: PARTIAL
+    evidence: [pyproject.toml, README.md]
+    gap: Dependency surface is narrow, but no formal supplier/dependency risk inventory and periodic review process exists.
+  BCM-001:
+    status: PARTIAL
+    evidence: [README.md, src/mirdexx/database.py]
+    gap: Database backup is a stated requirement; successful restore/RTO/RPO evidence is not present.
+  REV-001:
+    status: PARTIAL
+    evidence: [.github/workflows/test.yml, tests]
+    gap: Regression review exists; recurring internal audit and management review are not formalized.
+remediation:
+  p0: [INC-001, DAT-001, BCM-001, RSK-001]
+  p1: [IAM-001, CHG-001, SEC-001, SUP-001, REV-001]
+  external_assurance_gate: blocked_until_p0_closed_or_formally_risk_accepted
