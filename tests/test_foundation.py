@@ -35,7 +35,7 @@ def test_sqlite_bootstrap_creates_governed_schema(tmp_path: Path) -> None:
         ).fetchone()[0]
 
     assert {"schema_meta", "watched_sources", "normalized_events", "control_audit"}.issubset(tables)
-    assert version == "3"
+    assert version == "4"
 
 
 def test_source_registry_round_trip_and_pause(tmp_path: Path) -> None:

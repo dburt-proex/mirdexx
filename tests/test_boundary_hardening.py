@@ -170,4 +170,4 @@ def test_version_one_database_is_advanced_non_destructively(tmp_path: Path) -> N
 
     assert {"include_patterns", "exclude_patterns"}.issubset(columns)
     assert "normalized_events" in tables
-    assert version == "3"
+    assert version == "4"

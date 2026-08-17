@@ -56,13 +56,17 @@ class SourceRegistry:
         canonical_root = Path(root).expanduser().resolve(strict=False)
         if source_kind not in {"FOLDER", "GIT_REPOSITORY", "MANUAL"}:
             raise ValueError("unsupported source_kind")
-        if custody_mode not in {"METADATA_ONLY", "REDACTED_EXCERPT"}:
+        if custody_mode not in {"METADATA_ONLY", "REDACTED_EXCERPT", "CONTROLLED_CONTENT"}:
             raise ValueError("unsupported custody_mode")
 
         includes = self._normalize_patterns(include_patterns)
         excludes = self._normalize_patterns(exclude_patterns)
         now = datetime.now(timezone.utc).isoformat()
         source_id = str(uuid4())
+        # The legacy source row retains its original custody vocabulary. Full-content
+        # external processing is granted separately and is surfaced as the effective
+        # custody mode by get()/list_sources().
+        stored_custody = "METADATA_ONLY" if custody_mode == "CONTROLLED_CONTENT" else custody_mode
         try:
             with connect_database(self.database_path) as connection:
                 connection.execute(
@@ -77,7 +81,7 @@ class SourceRegistry:
                         source_id,
                         source_kind,
                         str(canonical_root),
-                        custody_mode,
+                        stored_custody,
                         policy_version,
                         json.dumps(includes),
                         json.dumps(excludes),
@@ -85,6 +89,16 @@ class SourceRegistry:
                         now,
                     ),
                 )
+                if custody_mode == "CONTROLLED_CONTENT":
+                    connection.execute(
+                        """
+                        INSERT INTO source_content_permissions(
+                            source_id, content_mode, external_processing_allowed,
+                            policy_version, authorized_at
+                        ) VALUES (?, 'CONTROLLED_CONTENT', 1, ?, ?)
+                        """,
+                        (source_id, policy_version, now),
+                    )
                 self._append_audit(
                     connection,
                     now,
@@ -93,6 +107,7 @@ class SourceRegistry:
                     json.dumps(
                         {
                             "canonical_root": str(canonical_root),
+                            "custody_mode": custody_mode,
                             "include_patterns": includes,
                             "exclude_patterns": excludes,
                             "policy_version": policy_version,
@@ -108,7 +123,19 @@ class SourceRegistry:
     def get(self, source_id: str) -> WatchedSource:
         with connect_database(self.database_path) as connection:
             row = connection.execute(
-                "SELECT * FROM watched_sources WHERE source_id = ?", (source_id,)
+                """
+                SELECT w.*,
+                       CASE
+                           WHEN p.external_processing_allowed = 1
+                                AND p.content_mode = 'CONTROLLED_CONTENT'
+                           THEN p.content_mode
+                           ELSE NULL
+                       END AS effective_content_mode
+                FROM watched_sources AS w
+                LEFT JOIN source_content_permissions AS p ON p.source_id = w.source_id
+                WHERE w.source_id = ?
+                """,
+                (source_id,),
             ).fetchone()
         if row is None:
             raise KeyError(source_id)
@@ -117,7 +144,18 @@ class SourceRegistry:
     def list_sources(self) -> list[WatchedSource]:
         with connect_database(self.database_path) as connection:
             rows = connection.execute(
-                "SELECT * FROM watched_sources ORDER BY created_at, source_id"
+                """
+                SELECT w.*,
+                       CASE
+                           WHEN p.external_processing_allowed = 1
+                                AND p.content_mode = 'CONTROLLED_CONTENT'
+                           THEN p.content_mode
+                           ELSE NULL
+                       END AS effective_content_mode
+                FROM watched_sources AS w
+                LEFT JOIN source_content_permissions AS p ON p.source_id = w.source_id
+                ORDER BY w.created_at, w.source_id
+                """
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
@@ -161,6 +199,10 @@ class SourceRegistry:
             )
             if cursor.rowcount != 1:
                 raise KeyError(source_id)
+            connection.execute(
+                "UPDATE source_content_permissions SET policy_version = ? WHERE source_id = ?",
+                (policy_version, source_id),
+            )
             self._append_audit(
                 connection,
                 now,
@@ -274,13 +316,15 @@ class SourceRegistry:
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> WatchedSource:
+        keys = set(row.keys())
+        effective = row["effective_content_mode"] if "effective_content_mode" in keys else None
         return WatchedSource(
             source_id=row["source_id"],
             source_kind=row["source_kind"],
             canonical_root=Path(row["canonical_root"]),
             enabled=bool(row["enabled"]),
             paused=bool(row["paused"]),
-            custody_mode=row["custody_mode"],
+            custody_mode=effective or row["custody_mode"],
             policy_version=row["policy_version"],
             include_patterns=tuple(json.loads(row["include_patterns"])),
             exclude_patterns=tuple(json.loads(row["exclude_patterns"])),

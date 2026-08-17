@@ -4,8 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = "3"
-
+SCHEMA_VERSION = "4"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -30,6 +29,19 @@ CREATE TABLE IF NOT EXISTS watched_sources (
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_watched_sources_root
 ON watched_sources(canonical_root);
+
+-- Full-content processing is an additive capability overlay. Keeping it in a
+-- separate table avoids rewriting the legacy watched_sources CHECK constraint
+-- and preserves all existing source rows and foreign-key identities in place.
+CREATE TABLE IF NOT EXISTS source_content_permissions (
+    source_id TEXT PRIMARY KEY,
+    content_mode TEXT NOT NULL CHECK (content_mode IN ('CONTROLLED_CONTENT')),
+    external_processing_allowed INTEGER NOT NULL DEFAULT 0
+        CHECK (external_processing_allowed IN (0, 1)),
+    policy_version TEXT NOT NULL,
+    authorized_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES watched_sources(source_id)
+);
 
 CREATE TABLE IF NOT EXISTS normalized_events (
     event_id TEXT PRIMARY KEY,
@@ -111,17 +123,13 @@ def connect_database(database_path: Path) -> sqlite3.Connection:
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-    }
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def bootstrap_database(database_path: Path) -> None:
-    """Create or safely advance the local schema without destructive migration behavior."""
-
+    """Create or safely advance the local schema using additive migrations only."""
     with connect_database(database_path) as connection:
         connection.executescript(_SCHEMA)
         _ensure_column(connection, "watched_sources", "include_patterns", "TEXT NOT NULL DEFAULT '[]'")
@@ -131,3 +139,6 @@ def bootstrap_database(database_path: Path) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (SCHEMA_VERSION,),
         )
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"foreign key integrity check failed after schema migration: {violations}")
