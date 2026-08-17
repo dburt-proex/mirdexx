@@ -30,9 +30,11 @@ def _parser() -> argparse.ArgumentParser:
     ingest.add_argument("--db", type=Path, default=Path(".mirdexx/mirdexx.db"))
     ingest.add_argument("--mode", choices=["standard", "timestamped", "diarized"], default="standard")
     ingest.add_argument("--language")
-    ingest.add_argument("--project")
+    ingest.add_argument("--project", help="Human-readable project reference for analysis and display")
+    ingest.add_argument("--project-page-id", help="Canonical Notion Project page ID used for relations")
     ingest.add_argument("--data-policy", choices=["Private", "Internal", "Public"], default="Internal")
     ingest.add_argument("--source-url")
+    ingest.add_argument("--promote-candidates", action="store_true", help="Create governed candidate Tasks, Decisions, and Evidence in canonical Notion databases")
     ingest.add_argument("--no-notion", action="store_true", help="Run through analysis without publishing to Notion")
     return parser
 
@@ -52,7 +54,7 @@ def main() -> int:
         print(json.dumps({"source_id": source.source_id, "root": str(source.canonical_root), "custody_mode": source.custody_mode}, indent=2))
         return 0
 
-    sink = None if args.no_notion else NotionVideoIntelligenceSink()
+    sink = None if args.no_notion else NotionVideoIntelligenceSink(promote_candidates=args.promote_candidates)
     pipeline = MediaIntelligencePipeline(
         ledger=EventLedger(args.db),
         transcriber=OpenAITranscriber(),
@@ -65,6 +67,7 @@ def main() -> int:
         mode=args.mode,
         language=args.language,
         project_ref=args.project,
+        project_page_id=args.project_page_id,
         data_policy=args.data_policy,
         source_url=args.source_url,
     )
