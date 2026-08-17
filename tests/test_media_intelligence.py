@@ -12,6 +12,7 @@ from mirdexx.media_intelligence.models import (
     DecisionRecord,
     EvidenceRecord,
     MediaAnalysis,
+    NotionPublishResult,
     TaskRecord,
     TranscriptResult,
     TranscriptSegment,
@@ -58,7 +59,14 @@ class FakeSink:
 
     def publish(self, media_path, **kwargs):
         self.calls.append((media_path, kwargs))
-        return "notion-page", "https://notion.example/page"
+        return NotionPublishResult(
+            page_id="notion-page",
+            page_url="https://notion.example/page",
+            promotion_state="REVIEW",
+            promoted_task_ids=["task-1"],
+            promoted_decision_ids=["decision-1"],
+            promoted_evidence_ids=["evidence-1"],
+        )
 
 
 def test_controlled_content_migration_and_registration(tmp_path):
@@ -110,7 +118,7 @@ def test_pipeline_aborts_on_empty_transcription(tmp_path):
         pipeline.ingest(media, source_id=source.source_id)
 
 
-def test_pipeline_preserves_provenance_and_publishes(tmp_path):
+def test_pipeline_preserves_provenance_and_promotion_receipt(tmp_path):
     db = tmp_path / "db.sqlite"
     bootstrap_database(db)
     root = tmp_path / "media"
@@ -121,17 +129,27 @@ def test_pipeline_preserves_provenance_and_publishes(tmp_path):
     sink = FakeSink()
     ledger = EventLedger(db)
     result = MediaIntelligencePipeline(ledger=ledger, transcriber=FakeTranscriber(), analyzer=FakeAnalyzer(), sink=sink).ingest(
-        media, source_id=source.source_id, mode="diarized", project_ref="CASA"
+        media,
+        source_id=source.source_id,
+        mode="diarized",
+        project_ref="CASA",
+        project_page_id="project-page",
     )
     assert result.notion_page_id == "notion-page"
+    assert result.promotion_state == "REVIEW"
+    assert result.promoted_task_ids == ["task-1"]
+    assert result.promoted_decision_ids == ["decision-1"]
+    assert result.promoted_evidence_ids == ["evidence-1"]
     assert result.analysis.casa_routing == "REVIEW"
     original = ledger.get(result.original_event_id)
     transcript = ledger.get(result.transcript_event_id)
     analysis = ledger.get(result.analysis_event_id)
+    assert result.transcript_sha256 == transcript.content_hash
     assert original.custody_mode == "controlled_content"
     assert f"event:{original.event_id}" in transcript.provenance_refs
     assert f"event:{transcript.event_id}" in analysis.provenance_refs
     assert sink.calls[0][1]["source_sha256"] == original.content_hash
+    assert sink.calls[0][1]["project_page_id"] == "project-page"
 
 
 def test_transcriber_normalizes_diarized_segments(tmp_path):
@@ -169,3 +187,47 @@ def test_notion_single_part_upload_uses_file_upload_api(tmp_path):
     assert sink.upload_media(path) == "upload-1"
     assert seen[0] == ("POST", "/v1/file_uploads", "2026-03-11")
     assert seen[1][1].endswith("/send")
+
+
+def test_canonical_promotion_requires_all_target_data_sources():
+    with pytest.raises(ValueError, match="canonical promotion requires"):
+        NotionVideoIntelligenceSink(token="test", data_source_id="media", promote_candidates=True)
+
+
+def test_candidate_promotion_creates_related_task_decision_and_evidence_records():
+    class RecordingSink(NotionVideoIntelligenceSink):
+        def __init__(self):
+            super().__init__(
+                token="test",
+                data_source_id="media-ds",
+                projects_data_source_id="projects-ds",
+                tasks_data_source_id="tasks-ds",
+                decisions_data_source_id="decisions-ds",
+                evidence_data_source_id="evidence-ds",
+                promote_candidates=True,
+            )
+            self.created = []
+
+        def _create_record(self, data_source_id, properties):
+            record_id = f"record-{len(self.created) + 1}"
+            self.created.append((data_source_id, properties))
+            return {"id": record_id}
+
+    sink = RecordingSink()
+    analysis = FakeAnalyzer().analyze(FakeTranscriber().transcribe(None), project_ref="CASA")
+    task_ids, decision_ids, evidence_ids = sink._promote_candidates(
+        media_page_id="media-page",
+        analysis=analysis,
+        transcript_sha256="a" * 64,
+        transcript_artifact_id="transcript-event",
+        analysis_artifact_id="analysis-event",
+        project_page_id="project-page",
+        data_policy="Internal",
+    )
+    assert task_ids == ["record-1"]
+    assert decision_ids == ["record-2"]
+    assert evidence_ids == ["record-3"]
+    assert sink.created[0][0] == "tasks-ds"
+    assert sink.created[0][1]["Project"]["relation"][0]["id"] == "project-page"
+    assert sink.created[1][1]["Origin Media"]["relation"][0]["id"] == "media-page"
+    assert sink.created[2][1]["Integrity SHA256"]["rich_text"][0]["text"]["content"] == "a" * 64
