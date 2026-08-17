@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 TranscriptionMode = Literal["standard", "timestamped", "diarized"]
 CasaRouting = Literal["ALLOW", "REVIEW", "HALT"]
+PromotionState = Literal["Not Promoted", "Candidate", "REVIEW", "Promoted", "Rejected"]
 
 
 class TranscriptSegment(BaseModel):
@@ -64,12 +65,26 @@ class MediaAnalysis(BaseModel):
     project_ref: str | None = None
 
 
+class NotionPublishResult(BaseModel):
+    page_id: str
+    page_url: str | None = None
+    promotion_state: PromotionState = "Not Promoted"
+    promoted_task_ids: list[str] = Field(default_factory=list)
+    promoted_decision_ids: list[str] = Field(default_factory=list)
+    promoted_evidence_ids: list[str] = Field(default_factory=list)
+
+
 class PipelineResult(BaseModel):
     original_event_id: str
     transcript_event_id: str
     analysis_event_id: str
     source_sha256: str
+    transcript_sha256: str
     notion_page_id: str | None = None
     notion_page_url: str | None = None
+    promotion_state: PromotionState | None = None
+    promoted_task_ids: list[str] = Field(default_factory=list)
+    promoted_decision_ids: list[str] = Field(default_factory=list)
+    promoted_evidence_ids: list[str] = Field(default_factory=list)
     analysis: MediaAnalysis
     transcript: TranscriptResult
