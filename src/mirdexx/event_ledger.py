@@ -24,6 +24,7 @@ _QUARANTINE_RANK = {"clear": 0, "review": 1, "required": 2, "rejected": 3}
 _SOURCE_CUSTODY = {
     "METADATA_ONLY": "metadata_only",
     "REDACTED_EXCERPT": "redacted_excerpt",
+    "CONTROLLED_CONTENT": "controlled_content",
 }
 
 
